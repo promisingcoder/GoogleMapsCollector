@@ -27,6 +27,7 @@ Examples:
   python -m gmaps_extractor "Paris, France" "restaurants" --enrich
   python -m gmaps_extractor "Tokyo, Japan" "hotels" --enrich --reviews --reviews-limit 10
   python -m gmaps_extractor "Manhattan, NY" "lawyers" --parallel 10
+  python -m gmaps_extractor "New York, USA" "lawyers" --subdivide  # More results via sub-areas
   python -m gmaps_extractor "London, UK" "cafes" -o my_output.json --no-csv
         """
     )
@@ -88,6 +89,11 @@ Examples:
         action="store_true",
         help="Suppress progress output"
     )
+    parser.add_argument(
+        "--subdivide",
+        action="store_true",
+        help="Use named sub-areas for searching (can yield more results for large areas)"
+    )
 
     args = parser.parse_args()
 
@@ -107,6 +113,7 @@ Examples:
             output_file=args.output,
             output_csv=output_csv,
             parallel_workers=args.parallel,
+            subdivide=args.subdivide,
             verbose=not args.quiet,
         )
 

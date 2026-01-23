@@ -6,4 +6,4 @@ Geographic utilities module.
 """
 
 from .grid import GridCell, AreaBoundary, generate_grid, is_in_boundary, calculate_cell_size
-from .nominatim import get_area_boundary
+from .nominatim import get_area_boundary, get_sub_areas, get_subdivision_areas, SubArea

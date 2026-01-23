@@ -7,6 +7,7 @@ Collect all businesses of a category in a geographic area.
 Usage:
     python collect.py "New York, USA" "lawyers"
     python collect.py "Paris, France" "restaurants" --enrich --reviews
+    python collect.py "New York, USA" "lawyers" --subdivide  # More results via sub-areas
 
 Requires the API server to be running:
     python run_server.py

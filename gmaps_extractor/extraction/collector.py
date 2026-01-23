@@ -25,8 +25,8 @@ from ..config import (
     MAX_PARALLEL_WORKERS,
     CSV_COLUMNS,
 )
-from ..geo import get_area_boundary, generate_grid, is_in_boundary, calculate_cell_size
-from .search import execute_search
+from ..geo import get_area_boundary, generate_grid, is_in_boundary, calculate_cell_size, get_subdivision_areas, SubArea
+from .search import execute_search, execute_named_search
 from .enrichment import enrich_businesses
 
 
@@ -38,6 +38,48 @@ def check_api_available() -> bool:
             return response.status_code == 200
     except:
         return False
+
+
+def query_named_area(
+    area_name: str,
+    category: str,
+    results_per_page: int,
+) -> Tuple[str, List[Dict]]:
+    """
+    Query a named area with pagination. Returns (area_name, businesses).
+    Thread-safe function for parallel execution.
+    """
+    all_results = []
+    offset = 0
+
+    while True:
+        try:
+            businesses = execute_named_search(
+                category,
+                area_name,
+                results_per_page,
+                offset=offset,
+            )
+
+            if len(businesses) == 0:
+                break
+
+            # Add found_in metadata to each business
+            for biz in businesses:
+                biz['found_in'] = area_name
+
+            all_results.extend(businesses)
+
+            if len(businesses) < results_per_page:
+                break
+
+            offset += results_per_page
+            time.sleep(DELAY_BETWEEN_PAGES)
+
+        except Exception:
+            break
+
+    return (area_name, all_results)
 
 
 def query_cell(
@@ -117,6 +159,7 @@ def collect_businesses(
     output_file: str = None,
     output_csv: str = None,
     parallel_workers: int = DEFAULT_PARALLEL_WORKERS,
+    subdivide: bool = False,
     verbose: bool = True,
 ) -> Dict[str, Dict]:
     """
@@ -132,6 +175,7 @@ def collect_businesses(
         output_file: Path to save JSON results (auto-generated if None)
         output_csv: Path to save CSV results (auto-generated if None, set to False to disable)
         parallel_workers: Number of parallel workers for cell queries
+        subdivide: Use named sub-areas for searching (can yield more results)
         verbose: Whether to print progress
 
     Returns:
@@ -163,22 +207,58 @@ def collect_businesses(
         raise RuntimeError(f"Failed to fetch boundaries: {e}")
 
     if verbose:
-        print(f"\nGrid Area: {grid_boundary.name}")
+        print(f"\nMain Area: {grid_boundary.name}")
         print(f"  N={grid_boundary.north:.4f}, S={grid_boundary.south:.4f}")
         print(f"  E={grid_boundary.east:.4f}, W={grid_boundary.west:.4f}")
 
-    # Calculate cell size and generate grid
+    # Subdivision mode: get named sub-areas
+    sub_areas = []
+    use_subdivision = False
+
+    if subdivide:
+        if verbose:
+            print(f"\n{'='*70}")
+            print("SUBDIVISION MODE: Getting named sub-areas...")
+            print("=" * 70)
+
+        try:
+            _, sub_areas = get_subdivision_areas(area_name, verbose=verbose)
+            if sub_areas:
+                use_subdivision = True
+                if verbose:
+                    print(f"\n  Found {len(sub_areas)} sub-areas to search")
+                    for i, sa in enumerate(sub_areas[:10]):
+                        print(f"    {i+1}. {sa.full_name}")
+                    if len(sub_areas) > 10:
+                        print(f"    ... and {len(sub_areas) - 10} more")
+            else:
+                if verbose:
+                    print(f"\n  No sub-areas found, falling back to grid mode")
+        except Exception as e:
+            if verbose:
+                print(f"\n  Error getting sub-areas: {e}")
+                print(f"  Falling back to grid mode")
+
+    # Calculate cell size and generate grid (used for grid mode or as fallback)
     cell_size = calculate_cell_size(grid_boundary)
     cells = generate_grid(grid_boundary, cell_size_meters=cell_size)
 
-    # Limit parallel workers (minimum 1)
-    parallel_workers = max(1, min(parallel_workers, MAX_PARALLEL_WORKERS, len(cells)))
+    # Limit parallel workers
+    if use_subdivision:
+        parallel_workers = max(1, min(parallel_workers, MAX_PARALLEL_WORKERS, len(sub_areas)))
+    else:
+        parallel_workers = max(1, min(parallel_workers, MAX_PARALLEL_WORKERS, len(cells)))
 
     if verbose:
-        print(f"\nGrid Configuration:")
-        print(f"  Cell Size: {cell_size}m")
-        print(f"  Total Cells: {len(cells)}")
-        print(f"  Parallel Workers: {parallel_workers}")
+        if use_subdivision:
+            print(f"\nSubdivision Configuration:")
+            print(f"  Search Areas: {len(sub_areas)}")
+            print(f"  Parallel Workers: {parallel_workers}")
+        else:
+            print(f"\nGrid Configuration:")
+            print(f"  Cell Size: {cell_size}m")
+            print(f"  Total Cells: {len(cells)}")
+            print(f"  Parallel Workers: {parallel_workers}")
 
     # Setup output paths
     safe_area = area_name.split(",")[0].replace(" ", "_").lower()
@@ -206,20 +286,28 @@ def collect_businesses(
         print(f"  Results per page: {DEFAULT_RESULTS_PER_PAGE}")
         print(f"  Max radius: {DEFAULT_MAX_RADIUS}m")
 
-    # Collect businesses from all cells using parallel processing
+    # Collect businesses using parallel processing
     all_businesses = {}
     businesses_lock = Lock()
-    completed_cells = 0
+    completed_count = 0
     total_new = 0
     total_duplicates = 0
 
-    if verbose:
-        print(f"\n{'='*70}")
-        print(f"QUERYING {len(cells)} CELLS ({parallel_workers} parallel workers)...")
-        print("=" * 70)
+    if use_subdivision:
+        total_items = len(sub_areas)
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"QUERYING {len(sub_areas)} NAMED AREAS ({parallel_workers} parallel workers)...")
+            print("=" * 70)
+    else:
+        total_items = len(cells)
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"QUERYING {len(cells)} CELLS ({parallel_workers} parallel workers)...")
+            print("=" * 70)
 
-    def process_cell_result(cell_id: int, businesses: List[Dict]) -> Tuple[int, int]:
-        """Process results from a cell query. Returns (new_count, duplicate_count)."""
+    def process_result(item_id, businesses: List[Dict]) -> Tuple[int, int]:
+        """Process results from a query. Returns (new_count, duplicate_count)."""
         nonlocal all_businesses
         new_businesses = []
         new_count = 0
@@ -244,40 +332,63 @@ def collect_businesses(
 
     # Execute parallel queries
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-        # Submit all cell queries
-        future_to_cell = {
-            executor.submit(
-                query_cell,
-                cell,
-                category,
-                DEFAULT_RESULTS_PER_PAGE,
-                DEFAULT_MAX_RADIUS,
-                DEFAULT_VIEWPORT_DIST,
-            ): cell
-            for cell in cells
-        }
+        if use_subdivision:
+            # Submit named area queries
+            future_to_item = {
+                executor.submit(
+                    query_named_area,
+                    sub_area.full_name,
+                    category,
+                    DEFAULT_RESULTS_PER_PAGE,
+                ): sub_area
+                for sub_area in sub_areas
+            }
+        else:
+            # Submit cell queries
+            future_to_item = {
+                executor.submit(
+                    query_cell,
+                    cell,
+                    category,
+                    DEFAULT_RESULTS_PER_PAGE,
+                    DEFAULT_MAX_RADIUS,
+                    DEFAULT_VIEWPORT_DIST,
+                ): cell
+                for cell in cells
+            }
 
         # Process results as they complete
-        for future in as_completed(future_to_cell):
-            cell = future_to_cell[future]
-            completed_cells += 1
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            completed_count += 1
 
             try:
-                cell_id, businesses = future.result()
-                new_count, dup_count = process_cell_result(cell_id, businesses)
+                item_id, businesses = future.result()
+                new_count, dup_count = process_result(item_id, businesses)
                 total_new += new_count
                 total_duplicates += dup_count
 
                 if verbose:
                     elapsed = time.time() - start_time
-                    print(f"  [{completed_cells}/{len(cells)}] Cell {cell_id}: "
-                          f"+{new_count} new, {dup_count} dups | "
-                          f"Total: {len(all_businesses)} | "
-                          f"Time: {elapsed:.1f}s")
+                    if use_subdivision:
+                        # Truncate long area names for display
+                        display_name = item_id if len(item_id) <= 30 else item_id[:27] + "..."
+                        print(f"  [{completed_count}/{total_items}] {display_name}: "
+                              f"+{new_count} new, {dup_count} dups | "
+                              f"Total: {len(all_businesses)} | "
+                              f"Time: {elapsed:.1f}s")
+                    else:
+                        print(f"  [{completed_count}/{total_items}] Cell {item_id}: "
+                              f"+{new_count} new, {dup_count} dups | "
+                              f"Total: {len(all_businesses)} | "
+                              f"Time: {elapsed:.1f}s")
 
             except Exception as e:
                 if verbose:
-                    print(f"  [{completed_cells}/{len(cells)}] Cell {cell.cell_id}: ERROR - {e}")
+                    if use_subdivision:
+                        print(f"  [{completed_count}/{total_items}] {item.name}: ERROR - {e}")
+                    else:
+                        print(f"  [{completed_count}/{total_items}] Cell {item.cell_id}: ERROR - {e}")
 
     search_time = time.time() - start_time
 
@@ -354,8 +465,10 @@ def collect_businesses(
                 'east': filter_boundary.east,
                 'west': filter_boundary.west,
             },
-            'cell_size_meters': cell_size,
-            'cells_queried': len(cells),
+            'search_mode': 'subdivision' if use_subdivision else 'grid',
+            'cell_size_meters': cell_size if not use_subdivision else None,
+            'cells_queried': len(cells) if not use_subdivision else None,
+            'sub_areas_queried': len(sub_areas) if use_subdivision else None,
             'parallel_workers': parallel_workers,
             'enrichment': {
                 'details_fetched': enrich,
