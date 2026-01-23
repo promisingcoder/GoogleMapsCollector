@@ -26,7 +26,7 @@ from ..config import (
     CSV_COLUMNS,
 )
 from ..geo import get_area_boundary, generate_grid, is_in_boundary, calculate_cell_size, get_subdivision_areas, SubArea
-from .search import execute_search, execute_named_search
+from .search import execute_search
 from .enrichment import enrich_businesses
 
 
@@ -40,46 +40,60 @@ def check_api_available() -> bool:
         return False
 
 
-def query_named_area(
-    area_name: str,
+def query_sub_area_grid(
+    sub_area: SubArea,
     category: str,
     results_per_page: int,
+    max_radius: int,
+    viewport_dist: int,
 ) -> Tuple[str, List[Dict]]:
     """
-    Query a named area with pagination. Returns (area_name, businesses).
+    Query a sub-area using grid-based search. Returns (area_name, businesses).
+    Generates a grid for the sub-area and queries each cell.
     Thread-safe function for parallel execution.
     """
     all_results = []
-    offset = 0
 
-    while True:
-        try:
-            businesses = execute_named_search(
-                category,
-                area_name,
-                results_per_page,
-                offset=offset,
-            )
+    # Generate grid for this sub-area
+    cell_size = calculate_cell_size(sub_area.boundary)
+    cells = generate_grid(sub_area.boundary, cell_size_meters=cell_size)
 
-            if len(businesses) == 0:
+    # Query each cell in the sub-area's grid
+    for cell in cells:
+        offset = 0
+        while True:
+            try:
+                businesses = execute_search(
+                    category,
+                    cell.center_lat,
+                    cell.center_lng,
+                    results_per_page,
+                    max_radius,
+                    viewport_dist,
+                    offset=offset,
+                )
+
+                if len(businesses) == 0:
+                    break
+
+                # Add found_in metadata to each business
+                for biz in businesses:
+                    biz['found_in'] = sub_area.full_name
+
+                all_results.extend(businesses)
+
+                if len(businesses) < results_per_page:
+                    break
+
+                offset += results_per_page
+                time.sleep(DELAY_BETWEEN_PAGES)
+
+            except Exception:
                 break
 
-            # Add found_in metadata to each business
-            for biz in businesses:
-                biz['found_in'] = area_name
+        time.sleep(DELAY_BETWEEN_CELLS)
 
-            all_results.extend(businesses)
-
-            if len(businesses) < results_per_page:
-                break
-
-            offset += results_per_page
-            time.sleep(DELAY_BETWEEN_PAGES)
-
-        except Exception:
-            break
-
-    return (area_name, all_results)
+    return (sub_area.full_name, all_results)
 
 
 def query_cell(
@@ -249,10 +263,19 @@ def collect_businesses(
     else:
         parallel_workers = max(1, min(parallel_workers, MAX_PARALLEL_WORKERS, len(cells)))
 
+    # Calculate total cells for subdivision mode (needed for metadata)
+    total_cells = 0
+    if use_subdivision:
+        for sa in sub_areas:
+            sa_cell_size = calculate_cell_size(sa.boundary)
+            sa_cells = generate_grid(sa.boundary, cell_size_meters=sa_cell_size)
+            total_cells += len(sa_cells)
+
     if verbose:
         if use_subdivision:
-            print(f"\nSubdivision Configuration:")
-            print(f"  Search Areas: {len(sub_areas)}")
+            print(f"\nSubdivision Configuration (Grid per Sub-Area):")
+            print(f"  Sub-Areas: {len(sub_areas)}")
+            print(f"  Total Cells (all sub-areas): {total_cells}")
             print(f"  Parallel Workers: {parallel_workers}")
         else:
             print(f"\nGrid Configuration:")
@@ -297,7 +320,7 @@ def collect_businesses(
         total_items = len(sub_areas)
         if verbose:
             print(f"\n{'='*70}")
-            print(f"QUERYING {len(sub_areas)} NAMED AREAS ({parallel_workers} parallel workers)...")
+            print(f"QUERYING {len(sub_areas)} SUB-AREAS WITH GRID SEARCH ({parallel_workers} parallel workers)...")
             print("=" * 70)
     else:
         total_items = len(cells)
@@ -333,13 +356,15 @@ def collect_businesses(
     # Execute parallel queries
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         if use_subdivision:
-            # Submit named area queries
+            # Submit grid-based sub-area queries
             future_to_item = {
                 executor.submit(
-                    query_named_area,
-                    sub_area.full_name,
+                    query_sub_area_grid,
+                    sub_area,
                     category,
                     DEFAULT_RESULTS_PER_PAGE,
+                    DEFAULT_MAX_RADIUS,
+                    DEFAULT_VIEWPORT_DIST,
                 ): sub_area
                 for sub_area in sub_areas
             }
@@ -465,9 +490,9 @@ def collect_businesses(
                 'east': filter_boundary.east,
                 'west': filter_boundary.west,
             },
-            'search_mode': 'subdivision' if use_subdivision else 'grid',
-            'cell_size_meters': cell_size if not use_subdivision else None,
-            'cells_queried': len(cells) if not use_subdivision else None,
+            'search_mode': 'subdivision_grid' if use_subdivision else 'grid',
+            'cell_size_meters': cell_size if not use_subdivision else 'varies per sub-area',
+            'cells_queried': len(cells) if not use_subdivision else total_cells,
             'sub_areas_queried': len(sub_areas) if use_subdivision else None,
             'parallel_workers': parallel_workers,
             'enrichment': {
