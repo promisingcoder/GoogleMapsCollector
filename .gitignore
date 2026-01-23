@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Output files
+*.json
+!package.json
+output/
+results/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test/debug files
+test_*.py
+debug_*.py
+archive/
+
+# Environment variables
+.env
+.env.local
+
+# Config with credentials (use config.example.py as template)
+gmaps_extractor/config.py
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node modules
+node_modules/
+pb_decoder/frontend/node_modules/
+
+# Claude
+.claude/

@@ -1,0 +1,11 @@
+# Google Maps Business Extractor - Dependencies
+
+# Web framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# HTTP client
+httpx>=0.25.0
+
+# Data validation
+pydantic>=2.0.0
