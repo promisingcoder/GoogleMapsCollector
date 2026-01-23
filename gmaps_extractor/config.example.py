@@ -95,6 +95,8 @@ CSV_COLUMNS = [
     "name",
     "address",
     "place_id",
+    "hex_id",
+    "ftid",
     "rating",
     "review_count",
     "latitude",
@@ -104,6 +106,8 @@ CSV_COLUMNS = [
     "category",
     "categories",
     "hours",
+    "found_in",
+    "reviews_data",
 ]
 
 

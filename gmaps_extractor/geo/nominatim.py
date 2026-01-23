@@ -118,6 +118,10 @@ def get_sub_areas(
     headers = {"User-Agent": "GoogleMapsExtractor/1.0"}
     proxy_url = get_proxy_url()
 
+    # Minimum bounding box span to accept (0.05 degrees ≈ 5km)
+    # POIs typically get a default ~0.04 degree box, so this filters them out
+    MIN_SPAN = 0.05
+
     sub_areas = []
     seen_names = set()
 
@@ -152,7 +156,13 @@ def get_sub_areas(
                         name = result.get("name", "")
                         display_name = result.get("display_name", "")
                         osm_type = result.get("type", "")
+                        osm_class = result.get("class", "")
                         osm_id = result.get("osm_id", "")
+
+                        # Only accept place/boundary classes (actual geographic areas)
+                        valid_classes = ["place", "boundary", "landuse", "natural"]
+                        if osm_class not in valid_classes:
+                            continue
 
                         # Skip if we've already seen this area
                         if name.lower() in seen_names or not name:
@@ -167,6 +177,12 @@ def get_sub_areas(
                         north = float(bbox[1])
                         west = float(bbox[2])
                         east = float(bbox[3])
+
+                        # Skip small results (POIs get a default ~0.04 degree box)
+                        # Require at least 0.05 degrees (~5km) to be a real area
+                        MIN_SPAN = 0.05
+                        if (north - south) < MIN_SPAN or (east - west) < MIN_SPAN:
+                            continue
 
                         # If parent boundary provided, check if this sub-area is within it
                         if parent_boundary:
@@ -203,6 +219,79 @@ def get_sub_areas(
                         print(f"    Error searching '{query}': {e}")
 
                 time.sleep(delay)  # Respect rate limits
+
+        # If no sub-areas found with type searches, try known sub-area names for major cities
+        if not sub_areas:
+            known_sub_areas = {
+                "new york": ["Manhattan, New York", "Brooklyn, New York", "Queens, New York",
+                             "The Bronx, New York", "Staten Island, New York"],
+                "london": ["Westminster, London", "Camden, London", "Hackney, London",
+                          "Tower Hamlets, London", "Islington, London", "Southwark, London"],
+                "paris": ["1er arrondissement, Paris", "Le Marais, Paris", "Montmartre, Paris",
+                         "Saint-Germain-des-Prés, Paris", "Belleville, Paris"],
+                "los angeles": ["Downtown Los Angeles", "Hollywood, Los Angeles", "Santa Monica",
+                               "Venice, Los Angeles", "Beverly Hills"],
+            }
+
+            area_lower = area_name.lower()
+            for key, names in known_sub_areas.items():
+                if key in area_lower:
+                    if verbose:
+                        print(f"    Using known sub-areas for {key}...")
+
+                    for sub_name in names:
+                        params = {
+                            "q": sub_name,
+                            "format": "json",
+                            "limit": 1,
+                        }
+
+                        try:
+                            response = client.get(url, params=params, headers=headers)
+                            response.raise_for_status()
+                            data = response.json()
+
+                            if data:
+                                result = data[0]
+                                bbox = result.get("boundingbox")
+                                if bbox:
+                                    south = float(bbox[0])
+                                    north = float(bbox[1])
+                                    west = float(bbox[2])
+                                    east = float(bbox[3])
+
+                                    # Must have real area
+                                    if (north - south) < MIN_SPAN or (east - west) < MIN_SPAN:
+                                        continue
+
+                                    name = result.get("name", sub_name.split(",")[0])
+
+                                    boundary = AreaBoundary(
+                                        name=name,
+                                        north=north,
+                                        south=south,
+                                        east=east,
+                                        west=west,
+                                    )
+
+                                    sub_area = SubArea(
+                                        name=name,
+                                        full_name=result.get("display_name", sub_name),
+                                        boundary=boundary,
+                                        osm_id=str(result.get("osm_id", "")),
+                                        area_type=result.get("type", ""),
+                                    )
+
+                                    sub_areas.append(sub_area)
+                                    if verbose:
+                                        print(f"    Found: {name} ({result.get('type', '')})")
+
+                        except Exception as e:
+                            if verbose:
+                                print(f"    Error searching '{sub_name}': {e}")
+
+                        time.sleep(delay)
+                    break
 
     return sub_areas
 
@@ -250,40 +339,12 @@ def get_subdivision_areas(
     if verbose:
         print(f"  Found {len(level1_areas)} level-1 sub-areas")
 
-    # Level 2: Get sub-areas of each level-1 area
-    all_search_areas = []
+    # Use level-1 areas directly (boroughs/districts have good boundaries)
+    # Level-2 neighborhood search is unreliable with Nominatim
+    all_search_areas = level1_areas
 
-    if level1_areas:
-        if verbose:
-            print(f"\n  Level 2: Getting neighborhoods for each sub-area...")
-
-        for l1_area in level1_areas:
-            if verbose:
-                print(f"\n    Processing: {l1_area.name}")
-
-            # Search for neighborhoods within this sub-area
-            # Use the sub-area name combined with parent for better results
-            search_name = f"{l1_area.name}, {area_name}"
-
-            level2_areas = get_sub_areas(
-                search_name,
-                parent_boundary=l1_area.boundary,
-                area_types=["neighbourhood", "quarter", "suburb"],
-                delay=0.5,
-                verbose=verbose,
-            )
-
-            if level2_areas:
-                # Add level-2 areas with full context
-                for l2_area in level2_areas:
-                    l2_area.full_name = f"{l2_area.name}, {l1_area.name}"
-                    all_search_areas.append(l2_area)
-            else:
-                # No sub-areas found, use the level-1 area itself
-                all_search_areas.append(l1_area)
-
-        if verbose:
-            print(f"\n  Total search areas: {len(all_search_areas)}")
+    if verbose and level1_areas:
+        print(f"\n  Using {len(level1_areas)} sub-areas for search")
     else:
         # No sub-areas found at all, return empty list
         # Caller should fall back to grid approach

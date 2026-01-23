@@ -421,33 +421,39 @@ def collect_businesses(
         print(f"\n  Search completed in {search_time:.1f}s")
         print(f"  Found {len(all_businesses)} unique businesses")
 
-    # Filter by coordinates
-    if verbose:
-        print(f"\n{'='*70}")
-        print("FILTERING BY COORDINATES")
-        print("=" * 70)
-
+    # Filter by coordinates (skip in subdivision mode - sub-areas cover the search area)
     before_filter = len(all_businesses)
-    filtered_businesses = {}
     removed_count = 0
 
-    for place_id, biz in all_businesses.items():
-        lat = biz.get('latitude')
-        lng = biz.get('longitude')
+    if not use_subdivision:
+        if verbose:
+            print(f"\n{'='*70}")
+            print("FILTERING BY COORDINATES")
+            print("=" * 70)
 
-        if lat is None or lng is None:
-            filtered_businesses[place_id] = biz
-        elif is_in_boundary(lat, lng, filter_boundary):
-            filtered_businesses[place_id] = biz
-        else:
-            removed_count += 1
+        filtered_businesses = {}
 
-    all_businesses = filtered_businesses
+        for place_id, biz in all_businesses.items():
+            lat = biz.get('latitude')
+            lng = biz.get('longitude')
 
-    if verbose:
-        print(f"\n  Before filtering: {before_filter}")
-        print(f"  Removed (outside boundary): {removed_count}")
-        print(f"  After filtering: {len(all_businesses)}")
+            if lat is None or lng is None:
+                filtered_businesses[place_id] = biz
+            elif is_in_boundary(lat, lng, filter_boundary):
+                filtered_businesses[place_id] = biz
+            else:
+                removed_count += 1
+
+        all_businesses = filtered_businesses
+
+        if verbose:
+            print(f"\n  Before filtering: {before_filter}")
+            print(f"  Removed (outside boundary): {removed_count}")
+            print(f"  After filtering: {len(all_businesses)}")
+    else:
+        if verbose:
+            print(f"\n  Subdivision mode: skipping coordinate filtering")
+            print(f"  Total businesses: {len(all_businesses)}")
 
     # Update CSV with filtered results (rewrite with only filtered)
     if output_csv:
