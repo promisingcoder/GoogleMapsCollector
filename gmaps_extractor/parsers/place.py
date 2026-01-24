@@ -43,7 +43,7 @@ def safe_get(obj: Any, *indices, default=None) -> Any:
 
 
 def extract_business_hours(hours_data: List) -> Optional[Dict[str, str]]:
-    """Extract business hours from the hours data array."""
+    """Extract business hours from the hours data array (old format at [34])."""
     days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
     hours = {}
 
@@ -67,6 +67,58 @@ def extract_business_hours(hours_data: List) -> Optional[Dict[str, str]]:
 
         return hours if hours else None
     except:
+        return None
+
+
+def extract_business_hours_new(hours_data: List) -> Optional[Dict[str, str]]:
+    """Extract business hours from the new format at [203][0].
+
+    New format structure:
+    [
+        ['Friday', 5, [2026, 1, 23], [['9 AM–5 PM', [[9], [17]]]], 0, 1],
+        ['Saturday', 6, [2026, 1, 24], [['Closed']], 0, 2],
+        ...
+    ]
+
+    Each entry: [day_name, day_num, [year, month, day], [[hours_string, ...]], flag1, flag2]
+    """
+    hours = {}
+
+    try:
+        if not isinstance(hours_data, list):
+            return None
+
+        for day_entry in hours_data:
+            if not isinstance(day_entry, list) or len(day_entry) < 4:
+                continue
+
+            day_name = day_entry[0]  # e.g., 'Friday'
+            hours_info = day_entry[3]  # e.g., [['9 AM–5 PM', [[9], [17]]]] or [['Closed']]
+
+            if not isinstance(day_name, str):
+                continue
+
+            day_key = day_name.lower()
+
+            if isinstance(hours_info, list) and len(hours_info) > 0:
+                first_slot = hours_info[0]
+                if isinstance(first_slot, list) and len(first_slot) > 0:
+                    hours_str = first_slot[0]
+                    if isinstance(hours_str, str):
+                        # Clean up unicode characters (narrow no-break space, etc.)
+                        hours_str = hours_str.replace('\u202f', ' ').replace('\u2013', '-')
+                        hours[day_key] = hours_str
+                    else:
+                        hours[day_key] = 'Unknown'
+                elif isinstance(first_slot, str):
+                    hours[day_key] = first_slot.replace('\u202f', ' ').replace('\u2013', '-')
+                else:
+                    hours[day_key] = 'Unknown'
+            else:
+                hours[day_key] = 'Unknown'
+
+        return hours if hours else None
+    except Exception:
         return None
 
 
@@ -166,12 +218,19 @@ def extract_place_details(data: Any) -> Dict:
                 except:
                     pass
 
-    # Business hours
-    hours_data = safe_get(place_data, 34)
-    if isinstance(hours_data, list):
-        hours = extract_business_hours(hours_data)
+    # Business hours - try new location [203][0] first, fallback to old [34]
+    hours_data_new = safe_get(place_data, 203, 0)
+    if isinstance(hours_data_new, list) and len(hours_data_new) > 0:
+        hours = extract_business_hours_new(hours_data_new)
         if hours:
             details['hours'] = hours
+    else:
+        # Fallback to old location [34]
+        hours_data = safe_get(place_data, 34)
+        if isinstance(hours_data, list):
+            hours = extract_business_hours(hours_data)
+            if hours:
+                details['hours'] = hours
 
     # Photos
     photos_data = safe_get(place_data, 36)
@@ -269,12 +328,19 @@ def extract_place_details_from_place_response(data: Any) -> Dict:
                 details['website'] = item
                 break
 
-    # Business hours
-    hours_data = safe_get(place_data, 34)
-    if isinstance(hours_data, list):
-        hours = extract_business_hours(hours_data)
+    # Business hours - try new location [203][0] first, fallback to old [34]
+    hours_data_new = safe_get(place_data, 203, 0)
+    if isinstance(hours_data_new, list) and len(hours_data_new) > 0:
+        hours = extract_business_hours_new(hours_data_new)
         if hours:
             details['hours'] = hours
+    else:
+        # Fallback to old location [34]
+        hours_data = safe_get(place_data, 34)
+        if isinstance(hours_data, list):
+            hours = extract_business_hours(hours_data)
+            if hours:
+                details['hours'] = hours
 
     # Photos
     photos_data = safe_get(place_data, 36)

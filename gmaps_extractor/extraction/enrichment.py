@@ -77,9 +77,12 @@ def fetch_reviews(
     limit: int = 10,
     timeout: float = 30.0,
     cookies: Dict = None,
+    max_retries: int = 3,
+    page_size: int = 10,
+    page_delay: float = 0.5,
 ) -> Dict:
     """
-    Fetch review info for a place from the API.
+    Fetch review info for a place from the API with pagination support.
 
     Args:
         place_id: Google Maps place ID
@@ -88,48 +91,100 @@ def fetch_reviews(
         longitude: Business longitude
         hex_id: Hex format ID (0x...:0x...) for place endpoint
         ftid: Feature ID (like /g/11b5wlq0vc) for reviews
-        limit: Maximum number of reviews to fetch
+        limit: Maximum total number of reviews to fetch (uses pagination if > page_size)
         timeout: Request timeout in seconds
         cookies: Google cookies (required for reviews endpoint)
+        max_retries: Number of retry attempts on failure
+        page_size: Reviews per page (max 10-20, default 10)
+        page_delay: Delay between pagination requests in seconds
 
     Returns:
         Dictionary with review_count, rating, and reviews list
     """
-    payload = {
-        'place_id': place_id,
-        'sort_by': 'newest',
-        'limit': limit,
+    all_reviews = []
+    pagination_token = None
+    total_fetched = 0
+
+    # Limit page_size to max 20 (Google's limit)
+    page_size = min(page_size, 20)
+
+    while total_fetched < limit:
+        # Calculate how many to request this page
+        remaining = limit - total_fetched
+        request_size = min(page_size, remaining)
+
+        payload = {
+            'place_id': place_id,
+            'sort_by': 'newest',
+            'limit': request_size,
+        }
+        if name:
+            payload['name'] = name
+        if latitude is not None:
+            payload['latitude'] = latitude
+        if longitude is not None:
+            payload['longitude'] = longitude
+        if hex_id:
+            payload['hex_id'] = hex_id
+        if ftid:
+            payload['ftid'] = ftid
+        if cookies:
+            payload['cookies'] = cookies
+        if pagination_token:
+            payload['pagination_token'] = pagination_token
+
+        success = False
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.post(f"{API_BASE_URL}/api/reviews", json=payload)
+
+                    if response.status_code != 200:
+                        if attempt < max_retries - 1:
+                            time.sleep(1.0 * (attempt + 1))
+                            continue
+                        break
+
+                    data = response.json()
+                    if data.get('success'):
+                        page_reviews = data.get('reviews', [])
+                        all_reviews.extend(page_reviews)
+                        total_fetched += len(page_reviews)
+
+                        # Get next page token
+                        pagination_token = data.get('next_page_token')
+                        success = True
+                        break
+
+                    # API returned error - retry
+                    if attempt < max_retries - 1:
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    break
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                break
+
+        # Stop if request failed, no more pages, or got no reviews
+        if not success or not pagination_token or total_fetched == 0:
+            break
+
+        # Check if we got fewer reviews than requested (means no more available)
+        if len(data.get('reviews', [])) < request_size:
+            break
+
+        # Delay before next page
+        if total_fetched < limit:
+            time.sleep(page_delay)
+
+    return {
+        'review_count': len(all_reviews),
+        'rating': None,  # Rating not available from pagination endpoint
+        'reviews': all_reviews,
     }
-    if name:
-        payload['name'] = name
-    if latitude is not None:
-        payload['latitude'] = latitude
-    if longitude is not None:
-        payload['longitude'] = longitude
-    if hex_id:
-        payload['hex_id'] = hex_id
-    if ftid:
-        payload['ftid'] = ftid
-    if cookies:
-        payload['cookies'] = cookies
-
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(f"{API_BASE_URL}/api/reviews", json=payload)
-
-            if response.status_code != 200:
-                return {}
-
-            data = response.json()
-            if data.get('success'):
-                return {
-                    'review_count': data.get('review_count', 0),
-                    'rating': data.get('rating'),
-                    'reviews': data.get('reviews', []),
-                }
-            return {}
-    except Exception as e:
-        return {}
 
 
 def enrich_businesses(

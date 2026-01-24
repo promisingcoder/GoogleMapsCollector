@@ -23,7 +23,7 @@ from .parsers import (
     extract_place_details_from_place_response,
     extract_reviews_from_place_response,
 )
-from .config import get_proxy_url
+from .config import get_proxy_url, get_google_cookies
 
 
 # FastAPI app
@@ -59,6 +59,7 @@ class PlaceDetailsRequest(BaseModel):
     ftid: Optional[str] = None
     hex_id: Optional[str] = None
     cookies: Optional[Dict[str, str]] = None  # Optional Google cookies for full reviews
+    include_raw: Optional[bool] = False  # Include raw response for debugging
 
 
 class ReviewsRequest(BaseModel):
@@ -152,21 +153,25 @@ def build_url_with_params(base_url: str, url_params: Dict[str, str], pb_string: 
 def build_reviews_pb_string(hex_id: str, limit: int = 10, pagination_token: str = None) -> str:
     """Build pb parameter for reviews endpoint (/maps/rpc/listugcposts).
 
+    Uses exact format from working curl example.
+
     Args:
-        hex_id: Hex format ID (0x...:0x...) for the place
+        hex_id: Hex format ID (0x...:0x...) for the place - NOT URL-encoded
         limit: Number of reviews to fetch (default 10)
         pagination_token: Token for fetching next page (from previous response)
 
     Returns:
-        pb parameter string
+        pb parameter string (will be URL-encoded when placed in URL)
     """
-    hex_id_encoded = quote(hex_id) if hex_id else ""
+    # hex_id should be raw, not URL-encoded
+    hex_id_raw = hex_id if hex_id else ""
     token = pagination_token or ""
 
+    # Exact format from working curl
     return (
-        f"!1m6!1s{hex_id_encoded}"
+        f"!1m6!1s{hex_id_raw}"
         f"!6m4!4m1!1e1!4m1!1e3"
-        f"!2m2!1i{limit}!2s{quote(token)}"
+        f"!2m2!1i{limit}!2s{token}"
         f"!5m2!1s!7e81"
         f"!8m9!2b1!3b1!5b1!7b1!12m4!1b1!2b1!4m1!1e1"
         f"!11m4!1e3!2e1!6m1!1i2"
@@ -177,21 +182,28 @@ def build_reviews_pb_string(hex_id: str, limit: int = 10, pagination_token: str 
 def build_place_pb_string(hex_id: str, name: str, lat: float, lng: float, ftid: str = None) -> str:
     """Build pb parameter for place details request.
 
-    Uses the full working pb format that retrieves reviews and place details.
+    Uses the exact working pb format from browser inspection.
     The hex_id (format 0x...:0x...) is required for this endpoint to work.
+
+    IMPORTANT: hex_id and ftid should NOT be URL-encoded within the pb string.
+    Name should use + for spaces (not %20).
     """
-    hex_id_encoded = quote(hex_id) if hex_id else ""
-    name_encoded = quote(name) if name else ""
-    ftid_encoded = quote(ftid) if ftid else ""
+    # hex_id should be raw (e.g., 0x89c259a8669c0f0d:0x25d4109319b4f5a0)
+    hex_id_raw = hex_id if hex_id else ""
 
-    # Full working pb format (from browser inspection)
-    ftid_part = f"!15m2!1m1!4s{ftid_encoded}" if ftid else ""
+    # Name: replace spaces with + (not %20)
+    name_plus = name.replace(' ', '+') if name else ""
 
+    # ftid should be raw (e.g., /g/1vs5xm_3)
+    ftid_raw = ftid if ftid else ""
+    ftid_part = f"!15m2!1m1!4s{ftid_raw}" if ftid_raw else ""
+
+    # Exact working pb format from curl example
     return (
         f"!1m17"
-        f"!1s{hex_id_encoded}"
-        f"!2s{name_encoded}"
-        f"!3m8!1m3!1d3022!2d{lng}!3d{lat}!3m2!1i1024!2i768!4f13.1"
+        f"!1s{hex_id_raw}"
+        f"!2s{name_plus}"
+        f"!3m8!1m3!1d3022.7!2d{lng}!3d{lat}!3m2!1i1024!2i768!4f13.1"
         f"!4m2!3d{lat}!4d{lng}"
         f"{ftid_part}"
         "!12m4!2m3!1i360!2i120!4i8"
@@ -377,9 +389,12 @@ async def get_place_details(request: PlaceDetailsRequest):
         lng = request.longitude or -74.0060
 
         pb_string = build_place_pb_string(request.hex_id, name, lat, lng, request.ftid)
-        name_plus = quote(name).replace('%20', '+')
+        name_plus = name.replace(' ', '+')
 
-        url = f"https://www.google.com/maps/preview/place?authuser=0&hl=en&gl=us&q={name_plus}&pb={pb_string}"
+        # URL-encode the pb string (! -> %21, : -> %3A, etc.)
+        pb_encoded = quote(pb_string, safe='')
+
+        url = f"https://www.google.com/maps/preview/place?authuser=0&hl=en&gl=us&q={name_plus}&pb={pb_encoded}"
 
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
@@ -389,18 +404,25 @@ async def get_place_details(request: PlaceDetailsRequest):
             'Origin': 'https://www.google.com',
         }
 
-        data = await fetch_and_parse_json(url, headers, request.cookies)
+        # Auto-fetch cookies if not provided
+        cookies = request.cookies or get_google_cookies(auto_fetch=True)
+
+        data = await fetch_and_parse_json(url, headers, cookies)
         details = extract_place_details_from_place_response(data)
-        reviews = extract_reviews_from_place_response(data)
 
-        if reviews:
-            details['reviews'] = reviews
+        # Note: Inline reviews extraction disabled - use /api/reviews endpoint instead
+        # The place response structure doesn't contain proper reviews data
 
-        return {
+        result = {
             "success": True,
             "place_id": request.place_id,
             "details": details,
         }
+
+        if request.include_raw:
+            result["raw"] = data
+
+        return result
 
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Request timed out")
@@ -430,7 +452,10 @@ async def get_reviews(request: ReviewsRequest):
             pagination_token=request.pagination_token,
         )
 
-        url = f"https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=en&gl=us&pb={pb_string}"
+        # URL-encode the pb string
+        pb_encoded = quote(pb_string, safe='')
+
+        url = f"https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=en&gl=us&pb={pb_encoded}"
 
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
@@ -440,7 +465,16 @@ async def get_reviews(request: ReviewsRequest):
             'x-maps-diversion-context-bin': 'CAE=',
         }
 
-        data = await fetch_and_parse_json(url, headers, request.cookies)
+        # Auto-fetch cookies if not provided
+        cookies = request.cookies or get_google_cookies(auto_fetch=True)
+
+        data = await fetch_and_parse_json(url, headers, cookies)
+
+        # DEBUG: Log what we got from Google
+        print(f"DEBUG REVIEWS API: data type={type(data).__name__}, len={len(data) if isinstance(data, list) else 'N/A'}")
+        if isinstance(data, list) and len(data) > 2:
+            reviews_arr = data[2] if isinstance(data[2], list) else None
+            print(f"DEBUG REVIEWS API: data[2] type={type(data[2]).__name__ if len(data) > 2 else 'N/A'}, len={len(reviews_arr) if reviews_arr else 0}")
 
         # Extract reviews from listugcposts response
         # Structure: data[2] = reviews array, data[1] = pagination token
