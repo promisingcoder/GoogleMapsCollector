@@ -49,7 +49,9 @@ def enrich_reviews_only(
     start_time = time.time()
 
     for i, biz in enumerate(businesses):
-        name = biz.get('name', 'Unknown')[:35]
+        # Sanitize name for console output (remove non-ASCII chars)
+        raw_name = biz.get('name', 'Unknown')[:35]
+        name = raw_name.encode('ascii', 'replace').decode('ascii')
         hex_id = biz.get('hex_id')
 
         # Progress indicator
@@ -59,6 +61,12 @@ def enrich_reviews_only(
 
         if not hex_id:
             print(f"[{i+1}/{total}] {name:35} SKIP (no hex_id)     ({rate:.1f}/s, ETA: {eta:.0f}s)")
+            continue
+
+        # Skip if already has reviews
+        if biz.get('reviews_data'):
+            print(f"[{i+1}/{total}] {name:35} SKIP (already done)  ({rate:.1f}/s, ETA: {eta:.0f}s)")
+            success_count += 1
             continue
 
         try:
