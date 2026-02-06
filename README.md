@@ -20,70 +20,224 @@ This tool reverse-engineers Google Maps' internal API (protobuf-encoded search e
 - **Auto cookie management** — Builds Google sessions automatically by visiting google.com -> consent.google.com -> maps.google.com to obtain required cookies.
 - **Boundary filtering** — Removes results that fall outside the target area with configurable buffer distance.
 - **Reviews with pagination** — Fetches up to hundreds of reviews per business using Google's `listugcposts` endpoint.
+- **Pip-installable** — Install from PyPI or source. Use as a Python library or from the command line.
 
 ## Installation
 
+### From PyPI
+
 ```bash
-git clone https://github.com/promisingcoder/GoogleMapsCollector.git
-cd GoogleMapsCollector
+pip install gmaps-extractor
+```
 
-pip install -r requirements.txt
+### From Source
 
-# Setup configuration
-cp gmaps_extractor/config.example.py gmaps_extractor/config.py
-# Edit config.py with your proxy credentials (or use environment variables)
+```bash
+git clone https://github.com/promisingcoder/google_maps_business_extractor.git
+cd google_maps_business_extractor
+
+pip install -e .
 ```
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.9+
 - A residential/sticky proxy (required — Google blocks datacenter IPs)
 
 ## Quick Start
 
-### 1. Start the API Server
+### Python Library (Recommended)
 
-```bash
-python run_server.py
+The `GMapsExtractor` class is the main entry point for library usage. It automatically starts the internal API server in the background — no separate server process needed.
+
+```python
+from gmaps_extractor import GMapsExtractor
+
+with GMapsExtractor(proxy="http://user:pass@host:port") as extractor:
+    result = extractor.collect("New York, USA", "lawyers", enrich=True)
+    print(f"Found {len(result)} businesses")
+    for biz in result:
+        print(biz["name"], biz["address"])
 ```
 
-The server runs on `http://localhost:8000` and handles all communication with Google's endpoints.
+See the [Python Library API](#python-library-api) section below for full details.
 
-### 2. Collect Businesses
+### Command Line
 
 ```bash
+# Start the API server (required for CLI usage)
+gmaps-server
+# Or: python run_server.py
+
 # Basic collection
-python collect.py "New York, USA" "lawyers"
+gmaps-collect "New York, USA" "lawyers"
 
-# With place details and reviews
-python collect.py "Paris, France" "restaurants" --enrich --reviews --reviews-limit 20
-
-# Subdivision mode for large areas (searches each neighborhood separately)
-python collect.py "London, UK" "dentists" --subdivide
-
-# Custom parallelism and output
-python collect.py "Tokyo, Japan" "hotels" --parallel 30 -o my_output.json
+# Enhanced collector (V2) with reviews
+gmaps-collect-v2 "Paris, France" "restaurants" --enrich --reviews -l 50
 ```
 
-### 3. Enhanced Collector (V2) — Recommended for Large Jobs
+See the [CLI Reference](#cli-reference) section below for all available flags.
+
+## Python Library API
+
+### GMapsExtractor
+
+The `GMapsExtractor` class manages server lifecycle and configuration. Use it as a context manager for clean startup and shutdown.
+
+```python
+from gmaps_extractor import GMapsExtractor
+
+# Proxy via constructor argument
+with GMapsExtractor(proxy="http://user:pass@host:port") as extractor:
+    result = extractor.collect("New York, USA", "lawyers", enrich=True)
+
+# Proxy via environment variables (GMAPS_PROXY_HOST, GMAPS_PROXY_USER, GMAPS_PROXY_PASS)
+with GMapsExtractor() as extractor:
+    result = extractor.collect("London, UK", "dentists", subdivide=True)
+```
+
+#### Constructor Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `proxy` | `str` | `None` | Proxy URL (e.g., `"http://user:pass@host:port"`). Falls back to `GMAPS_PROXY_*` env vars. |
+| `cookies` | `dict` | `None` | Explicit cookie override. If `None`, cookies are handled automatically. |
+| `workers` | `int` | `20` | Default number of parallel search workers. |
+| `server_port` | `int` | `8000` | Port for the internal API server. |
+| `auto_start_server` | `bool` | `True` | Whether to auto-start the API server in the background. |
+| `verbose` | `bool` | `True` | Whether to print progress output. |
+
+#### collect() — V1 Collector
+
+```python
+result = extractor.collect(
+    "New York, USA",          # area (required)
+    "lawyers",                # category (required)
+    enrich=True,              # fetch place details (hours, phone, website)
+    reviews=True,             # fetch reviews
+    reviews_limit=20,         # max reviews per business
+    workers=30,               # parallel search workers
+    subdivide=True,           # use subdivision mode
+    buffer_km=5.0,            # boundary filter buffer in km
+    output_file="out.json",   # save JSON to file (None = auto-generate)
+    output_csv="out.csv",     # save CSV to file (False = disable CSV)
+    verbose=False,            # suppress progress output
+)
+```
+
+#### collect_v2() — Enhanced Collector (Recommended for Large Jobs)
+
+```python
+result = extractor.collect_v2(
+    "Paris, France",          # area (required)
+    "restaurants",            # category (required)
+    enrich=True,              # fetch place details
+    reviews=True,             # fetch reviews
+    reviews_limit=50,         # max reviews per business
+    workers=30,               # parallel search workers
+    enrichment_workers=10,    # parallel enrichment workers
+    checkpoint_interval=100,  # save checkpoint every N businesses
+    resume=True,              # resume from checkpoint if available
+    subdivide=True,           # use subdivision mode
+    buffer_km=5.0,            # boundary filter buffer in km
+    output_file="out.json",   # save JSON to file
+    output_csv="out.csv",     # save CSV to file
+)
+```
+
+### CollectionResult
+
+Both `collect()` and `collect_v2()` return a `CollectionResult` object that supports iteration, indexing, and length.
+
+```python
+result = extractor.collect("New York, USA", "lawyers")
+
+# Length
+print(f"Found {len(result)} businesses")
+
+# Iteration
+for biz in result:
+    print(biz["name"], biz["rating"])
+
+# Indexing
+first = result[0]
+last_five = result[-5:]
+
+# Access structured data
+print(result.metadata)     # {"area": "New York, USA", "category": "lawyers", ...}
+print(result.statistics)   # {"total_collected": 1234, "duplicates_removed": 89, ...}
+print(result.businesses)   # [{"name": "...", "address": "...", ...}, ...]
+
+# Full dict (matches the JSON output structure)
+data = result.to_dict()    # {"metadata": {...}, "statistics": {...}, "businesses": [...]}
+```
+
+### Exception Handling
+
+All library exceptions inherit from `GMapsExtractorError`, so you can catch them broadly or handle specific cases.
+
+```python
+from gmaps_extractor import GMapsExtractor
+from gmaps_extractor.exceptions import (
+    GMapsExtractorError,   # base exception for all errors
+    ServerError,           # API server failed to start or is unreachable
+    BoundaryError,         # area boundaries could not be resolved via Nominatim
+    ConfigurationError,    # invalid or incomplete configuration
+    RateLimitError,        # rate-limiting exceeded retry capacity
+    AuthenticationError,   # proxy or cookie authentication failed
+)
+
+try:
+    with GMapsExtractor(proxy="http://user:pass@host:port") as extractor:
+        result = extractor.collect("New York, USA", "lawyers")
+except ServerError:
+    print("Could not start the API server")
+except BoundaryError:
+    print("Could not resolve area boundaries")
+except GMapsExtractorError as e:
+    print(f"Extraction failed: {e}")
+```
+
+### Low-Level Functions
+
+The lower-level `collect_businesses()` and `collect_businesses_v2()` functions are still available for advanced use. These require the API server to be running separately (via `gmaps-server` or `python run_server.py`).
+
+```python
+from gmaps_extractor import collect_businesses, collect_businesses_v2
+
+# Requires server running on localhost:8000
+businesses = collect_businesses("New York, USA", "lawyers", enrich=True)
+```
+
+### Important Notes
+
+- **Proxy is required** for production use. Pass via the `proxy` constructor argument or set `GMAPS_PROXY_HOST`, `GMAPS_PROXY_USER`, and `GMAPS_PROXY_PASS` environment variables.
+- **Cookies are handled automatically.** The system auto-fetches cookies from Google. You only need to provide them explicitly if the automatic flow fails.
+- **One instance at a time.** Only one `GMapsExtractor` instance should be active at a time, since configuration is applied to shared module-level globals.
+- **Use the context manager.** The `with` statement ensures the background server shuts down cleanly. Without it, call `extractor.shutdown()` manually when done.
+
+## Console Scripts
+
+After installing with `pip install gmaps-extractor`, the following commands are available globally:
+
+| Command | Equivalent Script | Description |
+|---------|-------------------|-------------|
+| `gmaps-collect` | `python collect.py` | V1 collector |
+| `gmaps-collect-v2` | `python collect_v2.py` | V2 enhanced collector (recommended) |
+| `gmaps-enrich-reviews` | `python enrich_reviews_only.py` | Add reviews to existing collection |
+| `gmaps-server` | `python run_server.py` | Start the API server |
+
+All flags are identical to their script equivalents:
 
 ```bash
-# Resumable collection with parallel enrichment
+# These are equivalent
+gmaps-collect-v2 "Manhattan, New York" "lawyers" --enrich --reviews -l 100
 python collect_v2.py "Manhattan, New York" "lawyers" --enrich --reviews -l 100
-
-# Resume an interrupted collection
-python collect_v2.py "Manhattan, New York" "lawyers" --resume
-
-# Full control
-python collect_v2.py "Los Angeles, CA" "restaurants" \
-  --enrich --reviews -l 50 \
-  --workers 30 --enrich-workers 10 \
-  --checkpoint 100 --subdivide
 ```
 
 ## CLI Reference
 
-### collect.py
+### collect.py / gmaps-collect
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -100,7 +254,7 @@ python collect_v2.py "Los Angeles, CA" "restaurants" \
 | `--no-csv` | off | Disable CSV output |
 | `-q, --quiet` | off | Suppress progress output |
 
-### collect_v2.py (Enhanced)
+### collect_v2.py / gmaps-collect-v2 (Enhanced)
 
 All flags from `collect.py` plus:
 
@@ -112,9 +266,52 @@ All flags from `collect.py` plus:
 | `--resume` | on | Resume from checkpoint if available |
 | `--no-resume` | off | Start fresh, ignore existing checkpoint |
 
+### CLI Quick Examples
+
+```bash
+# Start the server (required for CLI usage only — library API auto-starts it)
+gmaps-server
+
+# Basic collection
+gmaps-collect "New York, USA" "lawyers"
+
+# With place details and reviews
+gmaps-collect "Paris, France" "restaurants" --enrich --reviews --reviews-limit 20
+
+# Subdivision mode for large areas
+gmaps-collect "London, UK" "dentists" --subdivide
+
+# V2 with parallel enrichment and resumability
+gmaps-collect-v2 "Manhattan, New York" "lawyers" --enrich --reviews -l 100
+
+# Resume an interrupted V2 collection
+gmaps-collect-v2 "Manhattan, New York" "lawyers" --resume
+
+# Add reviews to an existing collection
+gmaps-enrich-reviews output/lawyers_in_manhattan.json -l 50
+
+# Full control
+gmaps-collect-v2 "Los Angeles, CA" "restaurants" \
+  --enrich --reviews -l 50 \
+  --workers 30 --enrich-workers 10 \
+  --checkpoint 100 --subdivide
+```
+
 ## Configuration
 
-### Option 1: Environment Variables (Recommended)
+### Option 1: Constructor Arguments (Library Only)
+
+```python
+with GMapsExtractor(
+    proxy="http://user:pass@host:port",
+    workers=30,
+    server_port=9000,
+    verbose=False,
+) as extractor:
+    result = extractor.collect("New York, USA", "lawyers")
+```
+
+### Option 2: Environment Variables (Recommended for CLI)
 
 ```bash
 export GMAPS_PROXY_HOST="your-proxy-host:port"
@@ -125,7 +322,7 @@ export GMAPS_PROXY_PASS="your-password"
 export GMAPS_COOKIES='{"NID":"...","SOCS":"...","AEC":"..."}'
 ```
 
-### Option 2: Config File
+### Option 3: Config File
 
 Edit `gmaps_extractor/config.py` (copied from `config.example.py`):
 
@@ -134,6 +331,8 @@ _DIRECT_PROXY_HOST = "your-proxy-host:port"
 _DIRECT_PROXY_USER = "username"
 _DIRECT_PROXY_PASS = "password_country-us_session-XXX_lifetime-30m_streaming-1"
 ```
+
+**Note:** When using the library API (`GMapsExtractor`), constructor arguments take highest priority, followed by environment variables, then `config.py` defaults. When using the CLI, environment variables and `config.py` are the configuration sources.
 
 ### Proxy Requirements
 
@@ -148,7 +347,7 @@ The system handles cookies automatically:
 - **NID, AEC, __Secure-BUCKET** — Auto-fetched by visiting Google pages in sequence
 - **SOCS** — Consent cookie provided in defaults, rarely needs updating
 - Cookies are cached for 1 hour and refreshed automatically
-- You can also provide cookies manually via the `GMAPS_COOKIES` environment variable or `update_cookies_from_string()` function
+- You can also provide cookies manually via the `GMAPS_COOKIES` environment variable or the `cookies` constructor argument
 
 ## Output Format
 
@@ -223,6 +422,8 @@ The FastAPI server exposes these endpoints on `http://localhost:8000`:
 | `/api/place-details` | POST | Fetch place details (hours, phone, photos) |
 | `/api/reviews` | POST | Fetch paginated reviews for a place |
 
+**Note:** When using the library API, the server is started automatically in the background. You only need to start it manually for CLI usage or direct API access.
+
 ## How It Works
 
 ```
@@ -265,9 +466,16 @@ The tool constructs requests using Google's internal `pb` (protobuf) URL paramet
 
 ```
 gmaps_extractor/
-├── __init__.py              # Package entry, exports collect_businesses()
-├── cli.py                   # CLI argument parsing
-├── config.py                # Proxy, cookies, rate limits, search parameters
+├── __init__.py              # Package entry, exports GMapsExtractor + collect functions
+├── extractor.py             # GMapsExtractor class and CollectionResult wrapper
+├── config_manager.py        # ExtractorConfig dataclass, bridges to config.py
+├── exceptions.py            # Custom exception hierarchy (GMapsExtractorError, etc.)
+├── _config_defaults.py      # Safe fallback config for pip-only installs (no config.py)
+├── cli.py                   # CLI argument parsing (V1)
+├── cli_v2.py                # CLI argument parsing (V2)
+├── cli_enrich.py            # CLI for reviews-only enrichment
+├── config.py                # Proxy, cookies, rate limits, search parameters (gitignored)
+├── config.example.py        # Template config with placeholders
 ├── server.py                # FastAPI server (all Google communication goes through here)
 ├── decoder/
 │   ├── pb.py                # Decodes Google's !field_type_value protobuf format
@@ -286,10 +494,11 @@ gmaps_extractor/
     ├── collector.py          # V1 orchestrator (parallel grid search)
     └── collector_v2.py       # V2 orchestrator (resumable, adaptive, parallel enrichment)
 
-collect.py                   # CLI entry point (V1)
-collect_v2.py                # CLI entry point (V2 - recommended)
+collect.py                   # CLI entry point (V1) — still works standalone
+collect_v2.py                # CLI entry point (V2) — still works standalone
 enrich_reviews_only.py       # Standalone tool to add reviews to existing collections
-run_server.py                # Starts the FastAPI server
+run_server.py                # Starts the FastAPI server — still works standalone
+pyproject.toml               # Package metadata, dependencies, console script entry points
 ```
 
 ## License

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmaps-extractor"
+version = "1.0.0"
+description = "Extract business data from Google Maps at scale"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = [
+    "google-maps",
+    "scraper",
+    "business-data",
+    "extractor",
+    "geocoding",
+    "places",
+    "reviews",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/promisingcoder/google_maps_business_extractor"
+Repository = "https://github.com/promisingcoder/google_maps_business_extractor"
+Issues = "https://github.com/promisingcoder/google_maps_business_extractor/issues"
+
+[project.scripts]
+gmaps-collect = "gmaps_extractor.cli:main"
+gmaps-collect-v2 = "gmaps_extractor.cli_v2:main"
+gmaps-enrich-reviews = "gmaps_extractor.cli_enrich:main"
+gmaps-server = "gmaps_extractor.server:run_server"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "build>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["gmaps_extractor*"]
+exclude = ["tests*", "archive*", "pb_decoder*"]
+
+[tool.setuptools.package-data]
+gmaps_extractor = ["config.example.py"]

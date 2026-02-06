@@ -4,14 +4,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Google Maps Business Extractor - A data collection tool that reverse-engineers Google Maps' internal API to extract business information at scale using raw HTTP requests.
+Google Maps Business Extractor - A pip-installable Python library and CLI tool that reverse-engineers Google Maps' internal API to extract business information at scale using raw HTTP requests.
 
 **Input:** Area name (e.g., "New York, USA") + Category (e.g., "lawyers")
 **Output:** JSON + CSV files with all businesses matching the criteria
 
+## Installation
+
+```bash
+# From PyPI
+pip install gmaps-extractor
+
+# From source (editable)
+pip install -e .
+
+# Legacy (still works)
+pip install -r requirements.txt
+```
+
 ## Commands
 
-### Collect Businesses
+### Library Usage (Recommended)
+```python
+from gmaps_extractor import GMapsExtractor
+
+# Server auto-starts in background — no need for run_server.py
+with GMapsExtractor(proxy="http://user:pass@host:port") as extractor:
+    result = extractor.collect("New York, USA", "lawyers", enrich=True)
+    result = extractor.collect_v2("Paris, France", "restaurants", reviews=True, reviews_limit=50)
+```
+
+### Console Scripts (after pip install)
+```bash
+gmaps-collect "New York, USA" "lawyers"
+gmaps-collect-v2 "Manhattan, New York" "lawyers" --enrich --reviews -l 100
+gmaps-enrich-reviews output/lawyers_in_manhattan.json -l 50
+gmaps-server  # start API server manually (only needed for CLI or low-level functions)
+```
+
+### Legacy CLI (still works from repo root)
 ```bash
 # Basic collection (V1)
 python collect.py "New York, USA" "lawyers"
@@ -30,37 +61,63 @@ python collect_v2.py "Manhattan, New York" "lawyers" --resume
 
 # Add reviews to existing collection
 python enrich_reviews_only.py output/lawyers_in_manhattan.json -l 50
-```
 
-### Start API Server (required for collection)
-```bash
+# Start API server (required for legacy CLI and low-level functions)
 python run_server.py
-```
-Server runs on http://localhost:8000
-
-### Install Dependencies
-```bash
-pip install -r requirements.txt
 ```
 
 ### Configuration
 ```bash
-# Copy example config
-cp gmaps_extractor/config.example.py gmaps_extractor/config.py
-
-# Or use environment variables
+# Environment variables (works for both library and CLI)
 export GMAPS_PROXY_HOST="host:port"
 export GMAPS_PROXY_USER="username"
 export GMAPS_PROXY_PASS="password"
 export GMAPS_COOKIES='{"NID":"...","SOCS":"..."}'
+
+# Config file (legacy, for CLI usage)
+cp gmaps_extractor/config.example.py gmaps_extractor/config.py
 ```
+
+## Library API
+
+### GMapsExtractor class (gmaps_extractor/extractor.py)
+- Main public API: `GMapsExtractor` with `collect()` and `collect_v2()` methods
+- Auto-starts FastAPI server in a background daemon thread
+- Context manager recommended (`with` statement) for clean server shutdown
+- Only one instance should be active at a time (shared module-level config)
+- Constructor args: `proxy`, `cookies`, `workers`, `server_port`, `auto_start_server`, `verbose`
+- Config priority: constructor args > env vars > config.py defaults
+
+### CollectionResult class (gmaps_extractor/extractor.py)
+- Wrapper around result dict with `.businesses`, `.metadata`, `.statistics`
+- Supports `len()`, iteration, indexing, slicing
+- `to_dict()` returns the full result as a plain dict
+
+### Exception Hierarchy (gmaps_extractor/exceptions.py)
+- `GMapsExtractorError` — base exception
+- `ServerError` — server start/connection failure
+- `BoundaryError` — Nominatim area resolution failure
+- `ConfigurationError` — invalid config
+- `RateLimitError` — retry capacity exceeded
+- `AuthenticationError` — proxy/cookie auth failure
+
+### Low-Level Functions (still available)
+- `collect_businesses()` — V1 collector, requires server running separately
+- `collect_businesses_v2()` — V2 collector, requires server running separately
+- These are lazy-imported via `__getattr__` in `__init__.py` to avoid import overhead
 
 ## Architecture
 
 ```
 gmaps_extractor/
-├── __init__.py              # Package entry, exports collect_businesses()
-├── cli.py                   # CLI argument parsing
+├── __init__.py              # Package entry, exports GMapsExtractor + lazy collect functions
+├── extractor.py             # GMapsExtractor class and CollectionResult wrapper
+├── config_manager.py        # ExtractorConfig dataclass, bridges constructor args to config.py
+├── exceptions.py            # Custom exception hierarchy (GMapsExtractorError, etc.)
+├── _config_defaults.py      # Safe fallback config for pip-only installs (no config.py)
+├── cli.py                   # CLI argument parsing (V1, entry point for gmaps-collect)
+├── cli_v2.py                # CLI argument parsing (V2, entry point for gmaps-collect-v2)
+├── cli_enrich.py            # CLI for reviews-only enrichment (gmaps-enrich-reviews)
 ├── config.py                # Proxy, cookies, rate limits, search params (gitignored)
 ├── config.example.py        # Template config with placeholders
 ├── server.py                # FastAPI server (all Google communication)
@@ -81,34 +138,46 @@ gmaps_extractor/
     ├── collector.py          # V1 orchestrator (parallel grid search)
     └── collector_v2.py       # V2 orchestrator (resumable, adaptive, parallel enrichment)
 
-collect.py                   # CLI entry point (V1)
-collect_v2.py                # CLI entry point (V2 - recommended)
+collect.py                   # Legacy CLI entry point (V1)
+collect_v2.py                # Legacy CLI entry point (V2 - recommended)
 enrich_reviews_only.py       # Standalone reviews enrichment tool
 run_server.py                # Starts the FastAPI server
+pyproject.toml               # Package metadata, dependencies, console script entry points
 ```
+
+## Console Script Entry Points (pyproject.toml)
+
+| Command | Module:Function |
+|---------|-----------------|
+| `gmaps-collect` | `gmaps_extractor.cli:main` |
+| `gmaps-collect-v2` | `gmaps_extractor.cli_v2:main` |
+| `gmaps-enrich-reviews` | `gmaps_extractor.cli_enrich:main` |
+| `gmaps-server` | `gmaps_extractor.server:run_server` |
 
 ## Data Flow
 
 ```
-1. CLI Input (area, category)
+1. CLI Input or GMapsExtractor.collect()/collect_v2() call
        ↓
-2. Nominatim API → Get area boundaries
+2. [Library only] Auto-start FastAPI server in background thread
        ↓
-3. Generate grid cells covering area
+3. Nominatim API → Get area boundaries
+       ↓
+4. Generate grid cells covering area
    (or subdivide into named sub-areas, then grid each one)
        ↓
-4. Parallel search across all cells:
+5. Parallel search across all cells:
    → Paginate through results (400 per page)
    → Adaptive rate limiting with exponential backoff
    → Deduplicate by place_id + hex_id
        ↓
-5. Filter by coordinates (inside boundary + buffer)
+6. Filter by coordinates (inside boundary + buffer)
        ↓
-6. [Optional] Parallel enrichment:
+7. [Optional] Parallel enrichment:
    → Place details (hours, phone, website)
    → Reviews with pagination (listugcposts endpoint)
        ↓
-7. Save to JSON + CSV (JSONL streaming in V2)
+8. Return CollectionResult / Save to JSON + CSV (JSONL streaming in V2)
 ```
 
 ## API Endpoints
@@ -195,3 +264,12 @@ The `pb` URL parameter uses `!{field}{type}{value}` format:
 - **JSONL streaming**: Writes businesses as they're collected, not just at the end
 - **Retry queue**: Failed cells are retried with increased retries (5 attempts)
 - **Dual dedup**: Deduplicates by both `place_id` and `hex_id`
+
+## Config Resolution Order
+
+When using `GMapsExtractor` (library API), configuration priority is:
+1. Constructor arguments (highest priority)
+2. Environment variables (`GMAPS_PROXY_HOST`, `GMAPS_PROXY_USER`, `GMAPS_PROXY_PASS`, `GMAPS_COOKIES`)
+3. `config.py` defaults (lowest priority)
+
+`config_manager.py` bridges constructor args to the legacy `config.py` module-level constants via `ExtractorConfig.apply()`. It also patches already-imported consumer modules that used `from ..config import X`.
