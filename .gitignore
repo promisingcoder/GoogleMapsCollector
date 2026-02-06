@@ -50,7 +50,12 @@ Thumbs.db
 # Test/debug files
 test_*.py
 debug_*.py
+find_hours*.py
 archive/
+
+# Misc
+nul
+quick_test_output.txt
 
 # Environment variables
 .env

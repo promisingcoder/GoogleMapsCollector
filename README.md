@@ -178,7 +178,7 @@ The system uses a smart cookie management approach:
 
 ## License
 
-Private repository - All rights reserved.
+MIT License - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
